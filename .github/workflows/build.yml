@@ -1,0 +1,116 @@
+# 工作流名称
+name: 编译Flutter引擎
+
+# 触发条件：手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_engine_version:
+        description: 'Flutter引擎版本(分支名或标签)'
+        default: 'main'
+        required: true
+
+jobs:
+  build-engine:
+    # 使用Ubuntu最新版本作为构建环境
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 安装必要的依赖
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl git unzip python3 python3-pip cmake ninja-build clang lld
+          pip install setuptools wheel six
+
+      # 创建工作目录
+      - name: 创建工作目录
+        run: mkdir -p $HOME/flutter_engine
+
+      # 下载depot_tools
+      - name: 下载depot_tools
+        run: |
+          cd $HOME/flutter_engine
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$HOME/flutter_engine/depot_tools" >> $GITHUB_PATH
+
+      # 创建.gclient文件
+      - name: 创建引擎配置文件
+        run: |
+          cd $HOME/flutter_engine
+          mkdir -p engine && cd engine
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": "src/flutter",
+              "url": "https://github.com/flutter/engine.git",
+              "deps_file": "DEPS",
+              "managed": False,
+            },
+          ]
+          EOF
+
+      # 同步代码
+      - name: 同步Flutter引擎源码
+        run: |
+          cd $HOME/flutter_engine/engine
+          git clone https://github.com/flutter/engine.git src/flutter
+          cd src/flutter
+          git checkout ${{ github.event.inputs.flutter_engine_version }}
+          cd ../..
+          gclient sync -D --no-history --nohooks
+
+      # 设置构建环境
+      - name: 设置构建环境
+        run: |
+          cd $HOME/flutter_engine/engine/src/flutter
+          ./tools/setup.sh
+
+      # 编译不同架构的引擎
+      - name: 编译Flutter引擎
+        run: |
+          cd $HOME/flutter_engine/engine/src/flutter
+          
+          # 配置并构建arm64
+          echo "配置arm64架构..."
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm64
+          echo "构建arm64架构..."
+          ninja -C out/android_release_arm64
+          
+          # 配置并构建arm
+          echo "配置arm架构..."
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm
+          echo "构建arm架构..."
+          ninja -C out/android_release_arm
+          
+          # 配置并构建x64
+          echo "配置x64架构..."
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=x64
+          echo "构建x64架构..."
+          ninja -C out/android_release_x64
+
+      # 创建输出目录结构
+      - name: 准备输出文件
+        run: |
+          mkdir -p $HOME/output/android-arm64-release/linux-arm64
+          mkdir -p $HOME/output/android-arm-release/linux-arm64
+          mkdir -p $HOME/output/android-x64-release/linux-arm64
+          
+          # 复制生成的工具
+          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_arm64/clang_x64/gen_snapshot $HOME/output/android-arm64-release/linux-arm64/
+          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_arm/clang_x64/gen_snapshot $HOME/output/android-arm-release/linux-arm64/
+          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_x64/clang_x64/gen_snapshot $HOME/output/android-x64-release/linux-arm64/
+          
+          # 创建说明文件
+          echo "这些是针对ARM64 Linux主机编译的Flutter引擎工具" > $HOME/output/README.md
+          echo "版本: ${{ github.event.inputs.flutter_engine_version }}" >> $HOME/output/README.md
+          echo "编译时间: $(date)" >> $HOME/output/README.md
+          echo "使用说明: 将这些文件放置到你的Flutter SDK中对应目录" >> $HOME/output/README.md
+
+      # 上传构建产物
+      - name: 上传编译好的引擎工具
+        uses: actions/upload-artifact@v3
+        with:
+          name: flutter-engine-tools-linux-arm64
+          path: $HOME/output/
+          retention-days: 30
