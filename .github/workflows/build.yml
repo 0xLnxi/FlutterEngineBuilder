@@ -49,7 +49,7 @@ jobs:
           cd engine_minimal
           
           # 下载depot_tools
-          echo "下载depot_tools..."
+          echo "下载depot_tools工具..."
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           export PATH="$PATH:$(pwd)/depot_tools"
           
@@ -90,11 +90,6 @@ jobs:
           # 展示目录结构以便调试
           echo "检查目录结构..."
           find . -maxdepth 2 -type d
-          find ./tools -type f | grep -i gn || echo "未找到gn脚本"
-          
-          # 修改DEPS文件以排除大型依赖
-          echo "修改DEPS文件以优化空间..."
-          sed -i '/fuchsia_sdk_root/d' DEPS
 
       # 同步依赖（使用优化选项）
       - name: 同步引擎依赖
@@ -110,25 +105,39 @@ jobs:
           echo "同步后的磁盘空间："
           df -h
 
+      # 安装缺少的sysroot
+      - name: 安装sysroot
+        run: |
+          cd engine_minimal/src/flutter
+          export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
+          
+          # 检查sysroot脚本是否存在
+          echo "查找sysroot安装脚本..."
+          find ../build -name "install-sysroot.py" | grep -i sysroot || echo "未找到sysroot安装脚本"
+          
+          # 安装sysroot
+          if [ -f "../build/linux/sysroot_scripts/install-sysroot.py" ]; then
+            echo "安装x64架构的sysroot..."
+            python3 ../build/linux/sysroot_scripts/install-sysroot.py --arch=x64
+          else
+            echo "尝试在其他位置查找sysroot安装脚本..."
+            find .. -name "install-sysroot.py" -exec python3 {} --arch=x64 \;
+          fi
+
       # 构建Android版gen_snapshot工具
       - name: 构建gen_snapshot工具
         run: |
           cd engine_minimal/src/flutter
           export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
           
-          # 检查gn工具参数
-          echo "检查gn工具参数..."
-          ./tools/gn --help | grep -i android-cpu
-          
-          # 正确配置gn构建（修正参数格式）
-          echo "配置ARM64构建（修正参数）..."
-          # 使用正确的参数格式
+          # 配置gn构建（使用正确的参数格式）
+          echo "配置ARM64构建..."
           ./tools/gn --runtime-mode=release --android --no-goma --android-cpu=arm64 --no-lto
           
           # 编译gen_snapshot工具
           echo "开始编译gen_snapshot..."
           cd ../..
-          ninja -C src/flutter/out/android_release gen_snapshot
+          ninja -C src/flutter/out/android_release_arm64 gen_snapshot
           
           # 创建输出目录
           mkdir -p /tmp/engine_output/android-arm64-release/linux-arm64
