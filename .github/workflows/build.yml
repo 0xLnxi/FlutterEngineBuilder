@@ -86,10 +86,6 @@ jobs:
           git clone --depth=1 https://github.com/flutter/engine.git flutter
           cd flutter
           git checkout ${{ github.event.inputs.engine_version }} || git checkout main
-          
-          # 展示目录结构以便调试
-          echo "检查目录结构..."
-          find . -maxdepth 2 -type d
 
       # 同步依赖（使用优化选项）
       - name: 同步引擎依赖
@@ -127,25 +123,31 @@ jobs:
       # 构建Android版gen_snapshot工具
       - name: 构建gen_snapshot工具
         run: |
+          # 进入Flutter引擎目录
           cd engine_minimal/src/flutter
           export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
           
-          # 配置gn构建（使用正确的参数格式）
+          # 配置gn构建
           echo "配置ARM64构建..."
           ./tools/gn --runtime-mode=release --android --no-goma --android-cpu=arm64 --no-lto
           
-          # 编译gen_snapshot工具
+          # 检查生成的输出目录
+          echo "检查生成的构建目录结构..."
+          ls -la out/
+          ls -la out/android_release_arm64 || echo "android_release_arm64目录不存在"
+          
+          # 编译gen_snapshot工具（在同一目录执行ninja）
           echo "开始编译gen_snapshot..."
-          cd ../..
-          ninja -C src/flutter/out/android_release_arm64 gen_snapshot
+          # 注意：不要改变工作目录，直接在当前目录执行ninja命令
+          ninja -C out/android_release_arm64 gen_snapshot
           
           # 创建输出目录
           mkdir -p /tmp/engine_output/android-arm64-release/linux-arm64
           
           # 查找并复制gen_snapshot工具到输出目录
           echo "查找gen_snapshot工具..."
-          find src/flutter/out -name "gen_snapshot" -type f -exec ls -la {} \;
-          find src/flutter/out -name "gen_snapshot" -type f -exec cp {} /tmp/engine_output/android-arm64-release/linux-arm64/ \;
+          find out -name "gen_snapshot" -type f -exec ls -la {} \;
+          find out -name "gen_snapshot" -type f -exec cp {} /tmp/engine_output/android-arm64-release/linux-arm64/ \;
           
           # 检查是否成功复制
           if [ -f "/tmp/engine_output/android-arm64-release/linux-arm64/gen_snapshot" ]; then
