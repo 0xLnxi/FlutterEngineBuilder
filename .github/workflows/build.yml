@@ -1,17 +1,21 @@
 # 工作流名称
-name: 编译Flutter引擎
+name: 构建Flutter ARM64 SDK
 
 # 触发条件：手动触发
 on:
   workflow_dispatch:
     inputs:
-      flutter_engine_version:
-        description: 'Flutter引擎版本'
-        default: 'main'
+      flutter_version:
+        description: 'Flutter版本'
+        default: 'stable'
+        required: true
+      channel:
+        description: 'Flutter通道(stable/beta/dev/master)'
+        default: 'stable'
         required: true
 
 jobs:
-  build-engine:
+  build-flutter-sdk:
     # 使用Ubuntu最新版本作为构建环境
     runs-on: ubuntu-latest
     
@@ -19,26 +23,65 @@ jobs:
       # 安装必要的依赖
       - name: 安装依赖
         run: |
+          # 安装构建依赖
           sudo apt-get update
           sudo apt-get install -y wget curl git unzip python3 python3-pip cmake ninja-build clang lld
           pip install setuptools wheel six
 
-      # 创建工作目录
-      - name: 创建工作目录
-        run: mkdir -p $HOME/flutter_engine
-
-      # 下载depot_tools
-      - name: 下载depot_tools
+      # 下载Flutter源码
+      - name: 下载Flutter源码
         run: |
-          cd $HOME/flutter_engine
+          # 克隆Flutter仓库
+          git clone https://github.com/flutter/flutter.git -b ${{ github.event.inputs.channel }} flutter-sdk
+          cd flutter-sdk
+          
+          # 如果指定了具体版本，则切换到该版本
+          if [[ "${{ github.event.inputs.flutter_version }}" != "stable" && "${{ github.event.inputs.flutter_version }}" != "beta" && "${{ github.event.inputs.flutter_version }}" != "dev" && "${{ github.event.inputs.flutter_version }}" != "master" ]]; then
+            git checkout tags/${{ github.event.inputs.flutter_version }} -b temp-branch
+          fi
+          
+          # 初始化Flutter
+          bin/flutter precache
+          
+          # 清理不需要的预下载缓存以减少空间占用
+          rm -rf bin/cache/artifacts/material_fonts
+
+      # 下载ARM64版本的Dart SDK
+      - name: 下载ARM64版本的Dart SDK
+        run: |
+          cd flutter-sdk
+          
+          # 从Flutter中获取匹配的Dart版本
+          DART_VERSION=$(cat bin/internal/dart-sdk.version)
+          echo "使用Dart版本: ${DART_VERSION}"
+          
+          # 下载ARM64版本的Dart SDK
+          mkdir -p temp_dart
+          cd temp_dart
+          curl -O https://storage.googleapis.com/dart-archive/channels/${{ github.event.inputs.channel }}/release/${DART_VERSION}/sdk/dartsdk-linux-arm64-release.zip
+          unzip dartsdk-linux-arm64-release.zip
+          
+          # 替换Flutter中的Dart SDK
+          cd ..
+          rm -rf bin/cache/dart-sdk
+          mkdir -p bin/cache/dart-sdk
+          cp -r temp_dart/dart-sdk/* bin/cache/dart-sdk/
+          rm -rf temp_dart
+          
+          # 验证ARM64版本的Dart
+          file bin/cache/dart-sdk/bin/dart
+          bin/cache/dart-sdk/bin/dart --version
+
+      # 下载depot_tools并准备构建Flutter引擎
+      - name: 准备构建Flutter引擎
+        run: |
+          mkdir -p engine
+          cd engine
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$HOME/flutter_engine/depot_tools" >> $GITHUB_PATH
-
-      # 创建.gclient文件
-      - name: 创建引擎配置文件
-        run: |
-          cd $HOME/flutter_engine
-          mkdir -p engine && cd engine
+          export PATH="$PATH:$(pwd)/depot_tools"
+          
+          # 创建.gclient文件
+          mkdir -p src
           cat > .gclient << 'EOF'
           solutions = [
             {
@@ -49,68 +92,108 @@ jobs:
             },
           ]
           EOF
-
-      # 同步代码
-      - name: 同步Flutter引擎源码
-        run: |
-          cd $HOME/flutter_engine/engine
-          git clone https://github.com/flutter/engine.git src/flutter
-          cd src/flutter
-          git checkout ${{ github.event.inputs.flutter_engine_version }}
+          
+          # 下载Flutter引擎源码
+          cd src
+          git clone https://github.com/flutter/engine.git flutter
+          cd flutter
+          
+          # 获取对应的引擎版本
+          ENGINE_VERSION=$(cat ../../../flutter-sdk/bin/internal/engine.version)
+          git checkout ${ENGINE_VERSION}
+          
+          # 同步依赖
           cd ../..
           gclient sync -D --no-history --nohooks
 
-      # 设置构建环境
-      - name: 设置构建环境
+      # 构建Flutter引擎关键组件
+      - name: 构建Flutter引擎组件
         run: |
-          cd $HOME/flutter_engine/engine/src/flutter
+          cd engine/src/flutter
+          
+          # 设置构建环境
           ./tools/setup.sh
-
-      # 编译不同架构的引擎
-      - name: 编译Flutter引擎
-        run: |
-          cd $HOME/flutter_engine/engine/src/flutter
           
-          # 配置并构建arm64
-          echo "配置arm64架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm64
+          # 构建android-arm64版本的gen_snapshot
           echo "构建arm64架构..."
-          ninja -C out/android_release_arm64
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm64
+          ninja -C out/android_release
           
-          # 配置并构建arm
-          echo "配置arm架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm
+          # 构建android-arm版本的gen_snapshot
           echo "构建arm架构..."
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm
           ninja -C out/android_release_arm
           
-          # 配置并构建x64
-          echo "配置x64架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=x64
+          # 构建android-x64版本的gen_snapshot
           echo "构建x64架构..."
+          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=x64
           ninja -C out/android_release_x64
 
-      # 创建输出目录结构
-      - name: 准备输出文件
+      # 集成编译好的工具到Flutter SDK
+      - name: 集成工具到Flutter SDK
         run: |
-          mkdir -p $HOME/output/android-arm64-release/linux-arm64
-          mkdir -p $HOME/output/android-arm-release/linux-arm64
-          mkdir -p $HOME/output/android-x64-release/linux-arm64
+          # 创建目录结构
+          mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64
+          mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-arm-release/linux-arm64
+          mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-x64-release/linux-arm64
           
-          # 复制生成的工具
-          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_arm64/clang_x64/gen_snapshot $HOME/output/android-arm64-release/linux-arm64/
-          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_arm/clang_x64/gen_snapshot $HOME/output/android-arm-release/linux-arm64/
-          cp $HOME/flutter_engine/engine/src/flutter/out/android_release_x64/clang_x64/gen_snapshot $HOME/output/android-x64-release/linux-arm64/
-          
-          # 创建说明文件
-          echo "这些是针对ARM64 Linux主机编译的Flutter引擎工具" > $HOME/output/README.md
-          echo "版本: ${{ github.event.inputs.flutter_engine_version }}" >> $HOME/output/README.md
-          echo "编译时间: $(date)" >> $HOME/output/README.md
-          echo "使用说明: 将这些文件放置到你的Flutter SDK中对应目录" >> $HOME/output/README.md
+          # 复制gen_snapshot工具
+          cp engine/src/flutter/out/android_release/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/
+          cp engine/src/flutter/out/android_release_arm/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm-release/linux-arm64/
+          cp engine/src/flutter/out/android_release_x64/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-x64-release/linux-arm64/
 
-      # 上传构建产物（更新到v4版本）
-      - name: 上传编译好的引擎工具
+      # 清理不必要的文件以减小体积
+      - name: 清理不必要的文件
+        run: |
+          cd flutter-sdk
+          # 清理Git历史记录
+          rm -rf .git
+          # 清理不必要的缓存文件
+          rm -rf bin/cache/dart-sdk/lib/_internal/js_runtime
+          rm -rf bin/cache/downloads
+
+      # 创建README文件
+      - name: 创建说明文件
+        run: |
+          cat > flutter-sdk/README_ARM64.md << 'EOF'
+          # Flutter ARM64 SDK
+
+          这是针对Linux ARM64平台优化的Flutter SDK。
+
+          ## 特性
+
+          - 包含ARM64版本的Dart SDK
+          - 包含针对Android构建的ARM64版本gen_snapshot工具
+          - 适用于Linux ARM64 (aarch64)开发环境
+
+          ## 使用方法
+
+          1. 解压此SDK到您选择的目录
+          2. 将bin目录添加到PATH环境变量
+          3. 运行`flutter doctor`检查环境设置
+
+          ## 注意
+
+          此SDK经过修改，适用于ARM64架构的Linux系统，解决了在ARM64平台上无法构建发布版APK的问题。
+          EOF
+
+      # 打包SDK
+      - name: 打包Flutter ARM64 SDK
+        run: |
+          SDK_VERSION="${{ github.event.inputs.flutter_version }}"
+          if [[ "$SDK_VERSION" == "stable" || "$SDK_VERSION" == "beta" || "$SDK_VERSION" == "dev" || "$SDK_VERSION" == "master" ]]; then
+            SDK_VERSION=$(cd flutter-sdk && git describe --tags)
+          fi
+          
+          # 打包整个SDK
+          cd flutter-sdk
+          cd ..
+          tar -czf flutter-sdk-linux-arm64-${SDK_VERSION}.tar.gz flutter-sdk
+
+      # 上传构建产物
+      - name: 上传Flutter ARM64 SDK
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-engine-tools-linux-arm64
-          path: $HOME/output/
+          name: flutter-sdk-linux-arm64
+          path: flutter-sdk-linux-arm64-*.tar.gz
           retention-days: 30
