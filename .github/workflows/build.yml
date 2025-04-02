@@ -87,6 +87,11 @@ jobs:
           cd flutter
           git checkout ${{ github.event.inputs.engine_version }} || git checkout main
           
+          # 展示目录结构以便调试
+          echo "检查目录结构..."
+          find . -maxdepth 2 -type d
+          find ./tools -type f | grep -i setup || echo "未找到setup脚本"
+          
           # 修改DEPS文件以排除大型依赖
           echo "修改DEPS文件以优化空间..."
           sed -i '/fuchsia_sdk_root/d' DEPS
@@ -111,35 +116,48 @@ jobs:
           cd engine_minimal/src/flutter
           export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
           
-          # 设置编译环境
-          echo "设置编译环境..."
-          ./tools/setup.sh
+          # 检查编译环境
+          echo "检查编译环境脚本..."
+          ls -la tools/
           
-          # 只构建arm64架构的gen_snapshot
-          echo "构建ARM64架构的gen_snapshot工具..."
+          # 直接创建必要的编译设置（而不是依赖setup.sh）
+          echo "手动设置编译环境..."
+          
+          # 安装构建所需的软件包
+          python3 -m pip install requests
+          
+          # 直接配置gn构建
+          echo "配置ARM64构建..."
+          # 使用gn工具直接配置，不依赖setup.sh
           ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm64 --no-lto
           
           # 编译gen_snapshot工具
           echo "开始编译gen_snapshot..."
           cd ..
-          ninja -C flutter/out/android_release gen_snapshot
+          ninja -C flutter/out/android_release_arm64 gen_snapshot
           
           # 创建输出目录
           mkdir -p /tmp/engine_output/android-arm64-release/linux-arm64
           
-          # 复制gen_snapshot工具到输出目录
-          if [ -f "flutter/out/android_release/clang_x64/gen_snapshot" ]; then
-            cp flutter/out/android_release/clang_x64/gen_snapshot /tmp/engine_output/android-arm64-release/linux-arm64/
+          # 查找并复制gen_snapshot工具到输出目录
+          echo "查找gen_snapshot工具..."
+          find flutter/out -name "gen_snapshot" -type f -exec ls -la {} \;
+          find flutter/out -name "gen_snapshot" -type f -exec cp {} /tmp/engine_output/android-arm64-release/linux-arm64/ \;
+          
+          # 检查是否成功复制
+          if [ -f "/tmp/engine_output/android-arm64-release/linux-arm64/gen_snapshot" ]; then
+            echo "成功生成gen_snapshot工具"
+            ls -la /tmp/engine_output/android-arm64-release/linux-arm64/
           else
-            echo "查找gen_snapshot工具..."
-            find flutter/out -name "gen_snapshot" -type f -exec cp {} /tmp/engine_output/android-arm64-release/linux-arm64/ \;
+            echo "未找到gen_snapshot工具，构建可能失败"
+            exit 1
           fi
 
       # 打包gen_snapshot工具
       - name: 打包gen_snapshot工具
         run: |
           # 创建说明文件
-          cat > /tmp/engine_output/README.md << 'EOF'
+          cat > /tmp/engine_output/README.md << EOF
           # Flutter 引擎工具 (ARM64版本)
 
           此压缩包包含用于Linux ARM64平台的Flutter引擎工具。
