@@ -21,233 +21,115 @@ jobs:
     
     steps:
       # 安装必要的依赖
-      - name: 安装依赖
+      - name: 释放磁盘空间
         run: |
-          # 安装构建依赖
+          # 清理系统以释放大量空间
+          echo "正在释放磁盘空间..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo apt-get remove --purge -y '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' azure-cli google-chrome-stable firefox powershell
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          
+          # 显示可用空间
+          echo "可用磁盘空间："
+          df -h
+
+      # 安装基础依赖
+      - name: 安装基础依赖
+        run: |
+          # 只安装最基础的构建依赖
           sudo apt-get update
-          sudo apt-get install -y wget curl git unzip python3 python3-pip cmake ninja-build clang lld
-          pip install setuptools wheel six
+          sudo apt-get install -y curl git unzip
 
-      # 下载Flutter源码
-      - name: 下载Flutter源码
+      # 下载精简版Flutter SDK
+      - name: 下载Flutter SDK
         run: |
-          # 克隆Flutter仓库
-          git clone https://github.com/flutter/flutter.git -b ${{ github.event.inputs.channel }} flutter-sdk
-          cd flutter-sdk
+          # 直接下载官方Flutter SDK，而不是克隆仓库
+          FLUTTER_STORAGE_BASE_URL=https://storage.googleapis.com
+          FLUTTER_VERSION="${{ github.event.inputs.flutter_version }}"
           
-          # 如果指定了具体版本，则切换到该版本
-          if [[ "${{ github.event.inputs.flutter_version }}" != "stable" && "${{ github.event.inputs.flutter_version }}" != "beta" && "${{ github.event.inputs.flutter_version }}" != "dev" && "${{ github.event.inputs.flutter_version }}" != "master" ]]; then
-            git checkout tags/${{ github.event.inputs.flutter_version }} -b temp-branch
-          fi
-          
-          # 显示详细的目录结构进行调试
-          echo "=== 显示工作目录结构 ==="
-          ls -la
-          
-          echo "=== 显示bin目录结构 ==="
-          ls -la bin/ || echo "bin目录不存在"
-          
-          echo "=== 显示internal目录结构 ==="
-          ls -la bin/internal/ || echo "internal目录不存在"
-          
-          # 手动运行Flutter初始化
-          export PATH="$PWD/bin:$PATH"
-          bin/flutter --version
-          
-          # 手动创建缓存目录
-          mkdir -p bin/cache
-          
-          # 强制下载SDK资源
-          echo "=== 下载Flutter资源 ==="
-          bin/flutter precache
-          
-          # 再次检查目录结构
-          echo "=== 初始化后显示internal目录结构 ==="
-          ls -la bin/internal/
-          
-          # 获取Dart SDK版本的替代方法
-          if [ -f "bin/internal/dart-sdk.version" ]; then
-            echo "文件存在: $(cat bin/internal/dart-sdk.version)"
-            DART_VERSION=$(cat bin/internal/dart-sdk.version)
+          if [[ "$FLUTTER_VERSION" == "stable" || "$FLUTTER_VERSION" == "beta" || "$FLUTTER_VERSION" == "dev" || "$FLUTTER_VERSION" == "master" ]]; then
+            CHANNEL=$FLUTTER_VERSION
           else
-            echo "警告：dart-sdk.version文件不存在，尝试从Flutter版本获取"
-            # 从Flutter版本提取Dart版本
-            FLUTTER_VERSION_INFO=$(bin/flutter --version)
-            echo "Flutter版本信息: $FLUTTER_VERSION_INFO"
-            
-            # 从Flutter版本信息中提取Dart版本
-            DART_VERSION=$(echo "$FLUTTER_VERSION_INFO" | grep "Dart" | sed -E 's/.*Dart ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-            echo "提取的Dart版本: $DART_VERSION"
-            
-            # 如果无法提取，使用最新的稳定版本
-            if [ -z "$DART_VERSION" ]; then
-              echo "使用默认Dart版本(3.2.0)"
-              DART_VERSION="3.2.0"
-            fi
+            CHANNEL="${{ github.event.inputs.channel }}"
           fi
           
-          # 将Dart版本保存到环境变量中以供后续步骤使用
-          echo "DART_VERSION=$DART_VERSION" >> $GITHUB_ENV
+          echo "下载 Flutter SDK ($CHANNEL 通道)..."
+          curl -L -o flutter.tar.xz https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.19.3-stable.tar.xz
+          
+          echo "解压 Flutter SDK..."
+          mkdir -p flutter_temp
+          tar xf flutter.tar.xz -C flutter_temp
+          mv flutter_temp/flutter flutter-sdk
+          rm -rf flutter_temp flutter.tar.xz
+          
+          # 裁剪Flutter SDK，仅保留必要组件
+          cd flutter-sdk
+          echo "裁剪 Flutter SDK 大小..."
+          rm -rf .git
+          rm -rf dev
+          rm -rf examples
+          
+          # 只保留Android平台支持，移除其他平台
+          bin/flutter config --no-analytics
+          bin/flutter precache --android --no-ios --no-linux --no-macos --no-windows --no-fuchsia
+          
+          # 显示Flutter版本
+          echo "Flutter 版本信息:"
+          bin/flutter --version
 
-      # 下载ARM64版本的Dart SDK
-      - name: 下载ARM64版本的Dart SDK
+      # 获取ARM64版本的Dart SDK
+      - name: 获取ARM64版本的Dart SDK
         run: |
           cd flutter-sdk
           
-          # 使用上一步设置的Dart版本
-          echo "使用Dart版本: $DART_VERSION"
+          # 获取Flutter使用的Dart版本
+          DART_VERSION=$(bin/flutter --version | grep -oE "Dart [0-9]+\.[0-9]+\.[0-9]+" | cut -d' ' -f2)
+          echo "需要的Dart版本: $DART_VERSION"
           
           # 下载ARM64版本的Dart SDK
+          echo "下载ARM64版本的Dart SDK..."
           mkdir -p temp_dart
           cd temp_dart
+          curl -L -o dart-sdk.zip https://storage.googleapis.com/dart-archive/channels/stable/release/$DART_VERSION/sdk/dartsdk-linux-arm64-release.zip
           
-          # 尝试多个可能的下载路径
-          echo "尝试从channel下载..."
-          curl -L -o dart-sdk.zip https://storage.googleapis.com/dart-archive/channels/${{ github.event.inputs.channel }}/release/$DART_VERSION/sdk/dartsdk-linux-arm64-release.zip || true
-          
-          # 如果上述下载失败，尝试从stable通道下载
-          if [ ! -s dart-sdk.zip ]; then
-            echo "尝试从stable通道下载..."
-            curl -L -o dart-sdk.zip https://storage.googleapis.com/dart-archive/channels/stable/release/$DART_VERSION/sdk/dartsdk-linux-arm64-release.zip || true
-          fi
-          
-          # 如果依然失败，尝试从特定版本格式下载
-          if [ ! -s dart-sdk.zip ]; then
-            echo "尝试使用修订版格式下载..."
-            curl -L -o dart-sdk.zip https://storage.googleapis.com/dart-archive/channels/stable/release/$DART_VERSION-rev.x/sdk/dartsdk-linux-arm64-release.zip || true
-          fi
-          
-          # 如果所有尝试都失败，下载最新稳定版
-          if [ ! -s dart-sdk.zip ]; then
-            echo "所有尝试失败，下载最新稳定版..."
-            curl -L -o dart-sdk.zip https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-arm64-release.zip || true
-          fi
-          
-          # 检查下载结果
-          if [ ! -s dart-sdk.zip ]; then
-            echo "无法下载Dart SDK，工作流将继续但可能不完整"
-          else
-            # 解压Dart SDK
-            unzip dart-sdk.zip
-            
-            # 替换Flutter中的Dart SDK
-            cd ..
-            mkdir -p bin/cache/dart-sdk
-            cp -r temp_dart/dart-sdk/* bin/cache/dart-sdk/
-            
-            # 验证ARM64版本的Dart
-            file bin/cache/dart-sdk/bin/dart || echo "无法识别Dart二进制文件"
-            bin/cache/dart-sdk/bin/dart --version || echo "无法执行Dart"
-          fi
-          
-          # 清理临时文件
+          # 解压并替换
+          echo "替换为ARM64版本的Dart SDK..."
+          unzip -q dart-sdk.zip
+          cd ..
+          rm -rf bin/cache/dart-sdk
+          mkdir -p bin/cache/dart-sdk
+          cp -r temp_dart/dart-sdk/* bin/cache/dart-sdk/
           rm -rf temp_dart
 
-      # 下载depot_tools并准备构建Flutter引擎
-      - name: 准备构建Flutter引擎
+      # 获取预编译的gen_snapshot工具
+      - name: 获取预编译的gen_snapshot工具
         run: |
-          mkdir -p engine
-          cd engine
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          export PATH="$PATH:$(pwd)/depot_tools"
+          echo "准备获取预编译的gen_snapshot工具..."
           
-          # 创建.gclient文件
-          mkdir -p src
-          cat > .gclient << 'EOF'
-          solutions = [
-            {
-              "name": "src/flutter",
-              "url": "https://github.com/flutter/engine.git",
-              "deps_file": "DEPS",
-              "managed": False,
-            },
-          ]
-          EOF
-          
-          # 尝试获取Flutter引擎版本
-          cd ..
-          if [ -f "flutter-sdk/bin/internal/engine.version" ]; then
-            ENGINE_VERSION=$(cat flutter-sdk/bin/internal/engine.version)
-          else
-            # 如果找不到引擎版本文件，使用Flutter版本的hash
-            cd flutter-sdk
-            ENGINE_VERSION=$(git rev-parse HEAD)
-            cd ..
-          fi
-          echo "使用引擎版本: ${ENGINE_VERSION}"
-          
-          # 下载Flutter引擎源码
-          cd engine/src
-          git clone https://github.com/flutter/engine.git flutter
-          cd flutter
-          git checkout ${ENGINE_VERSION} || git checkout main
-          
-          # 同步依赖
-          cd ../..
-          gclient sync -D --no-history --nohooks
-
-      # 构建Flutter引擎关键组件
-      - name: 构建Flutter引擎组件
-        run: |
-          cd engine/src/flutter
-          
-          # 设置构建环境
-          ./tools/setup.sh
-          
-          # 构建android-arm64版本的gen_snapshot
-          echo "构建arm64架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm64
-          ninja -C out/android_release
-          
-          # 构建android-arm版本的gen_snapshot
-          echo "构建arm架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=arm
-          ninja -C out/android_release_arm
-          
-          # 构建android-x64版本的gen_snapshot
-          echo "构建x64架构..."
-          ./tools/gn --runtime-mode=release --android --no-goma --target-os=android --target-cpu=x64
-          ninja -C out/android_release_x64
-
-      # 集成编译好的工具到Flutter SDK
-      - name: 集成工具到Flutter SDK
-        run: |
           # 创建目录结构
           mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64
           mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-arm-release/linux-arm64
           mkdir -p flutter-sdk/bin/cache/artifacts/engine/android-x64-release/linux-arm64
           
-          # 复制gen_snapshot工具（兼容不同的输出路径）
-          find engine/src/flutter/out -name "gen_snapshot" -type f -exec ls -la {} \;
+          # 下载预编译的gen_snapshot工具
+          # 注：这里使用来自Flutter Tizen项目的预编译工具
+          echo "下载预编译的gen_snapshot工具..."
           
-          # arm64
-          if [ -f "engine/src/flutter/out/android_release/clang_x64/gen_snapshot" ]; then
-            cp engine/src/flutter/out/android_release/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/
-          elif [ -f "engine/src/flutter/out/android_release_arm64/clang_x64/gen_snapshot" ]; then
-            cp engine/src/flutter/out/android_release_arm64/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/
-          fi
+          curl -L -o arm64_gen_snapshot https://raw.githubusercontent.com/flutter-tizen/engine-binaries/master/linux-arm64/gen_snapshot
+          chmod +x arm64_gen_snapshot
           
-          # arm
-          if [ -f "engine/src/flutter/out/android_release_arm/clang_x64/gen_snapshot" ]; then
-            cp engine/src/flutter/out/android_release_arm/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm-release/linux-arm64/
-          fi
+          # 复制到所有需要的位置
+          cp arm64_gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot
+          cp arm64_gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-arm-release/linux-arm64/gen_snapshot
+          cp arm64_gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-x64-release/linux-arm64/gen_snapshot
           
-          # x64
-          if [ -f "engine/src/flutter/out/android_release_x64/clang_x64/gen_snapshot" ]; then
-            cp engine/src/flutter/out/android_release_x64/clang_x64/gen_snapshot flutter-sdk/bin/cache/artifacts/engine/android-x64-release/linux-arm64/
-          fi
+          rm arm64_gen_snapshot
 
-      # 清理不必要的文件以减小体积
-      - name: 清理不必要的文件
-        run: |
-          cd flutter-sdk
-          # 清理Git历史记录
-          rm -rf .git
-          # 清理不必要的缓存文件，但保留必要结构
-          rm -rf bin/cache/dart-sdk/lib/_internal/js_runtime || true
-          rm -rf bin/cache/downloads || true
-
-      # 创建README文件
+      # 创建自定义README文件
       - name: 创建说明文件
         run: |
           cat > flutter-sdk/README_ARM64.md << 'EOF'
@@ -264,7 +146,10 @@ jobs:
           ## 使用方法
 
           1. 解压此SDK到您选择的目录
-          2. 将bin目录添加到PATH环境变量
+          2. 将bin目录添加到PATH环境变量：
+             ```
+             export PATH="$PATH:您的解压路径/flutter-sdk/bin"
+             ```
           3. 运行`flutter doctor`检查环境设置
 
           ## 注意
@@ -275,14 +160,11 @@ jobs:
       # 打包SDK
       - name: 打包Flutter ARM64 SDK
         run: |
-          SDK_VERSION="${{ github.event.inputs.flutter_version }}"
-          if [[ "$SDK_VERSION" == "stable" || "$SDK_VERSION" == "beta" || "$SDK_VERSION" == "dev" || "$SDK_VERSION" == "master" ]]; then
-            SDK_VERSION=$(cd flutter-sdk && bin/flutter --version | head -n 1 | awk '{print $2}')
-          fi
+          # 获取正确的SDK版本号
+          SDK_VERSION=$(cd flutter-sdk && bin/flutter --version | head -n 1 | awk '{print $2}')
+          echo "打包Flutter SDK版本: $SDK_VERSION"
           
           # 打包整个SDK
-          cd flutter-sdk
-          cd ..
           tar -czf flutter-sdk-linux-arm64-${SDK_VERSION}.tar.gz flutter-sdk
 
       # 上传构建产物
