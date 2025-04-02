@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       flutter_engine_version:
-        description: 'Flutter引擎版本(分支名或标签)'
+        description: 'Flutter引擎版本'
         default: 'main'
         required: true
 
@@ -107,9 +107,9 @@ jobs:
           echo "编译时间: $(date)" >> $HOME/output/README.md
           echo "使用说明: 将这些文件放置到你的Flutter SDK中对应目录" >> $HOME/output/README.md
 
-      # 上传构建产物
+      # 上传构建产物（更新到v4版本）
       - name: 上传编译好的引擎工具
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: flutter-engine-tools-linux-arm64
           path: $HOME/output/
