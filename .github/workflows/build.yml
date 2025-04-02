@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       flutter_version:
-        description: 'Flutter版本'
+        description: 'Flutter版本(例如:3.19.3)'
         default: 'stable'
         required: true
       channel:
@@ -40,11 +40,23 @@ jobs:
             git checkout tags/${{ github.event.inputs.flutter_version }} -b temp-branch
           fi
           
-          # 初始化Flutter
-          bin/flutter precache
+          # 列出文件结构，检查是否正确克隆
+          ls -la
+          ls -la bin/
+          ls -la bin/internal/ || echo "内部目录不存在"
+
+          # 真正激活Flutter并下载所有资源
+          export PATH="$PWD/bin:$PATH"
+          bin/flutter --version
+          bin/flutter precache --all-platforms
           
-          # 清理不需要的预下载缓存以减少空间占用
-          rm -rf bin/cache/artifacts/material_fonts
+          # 验证文件是否存在
+          if [ -f "bin/internal/dart-sdk.version" ]; then
+            echo "文件存在: $(cat bin/internal/dart-sdk.version)"
+          else
+            echo "错误: dart-sdk.version文件不存在"
+            exit 1
+          fi
 
       # 下载ARM64版本的Dart SDK
       - name: 下载ARM64版本的Dart SDK
@@ -59,6 +71,14 @@ jobs:
           mkdir -p temp_dart
           cd temp_dart
           curl -O https://storage.googleapis.com/dart-archive/channels/${{ github.event.inputs.channel }}/release/${DART_VERSION}/sdk/dartsdk-linux-arm64-release.zip
+          
+          # 检查下载是否成功
+          if [ $? -ne 0 ]; then
+            echo "尝试替代下载路径..."
+            curl -O https://storage.googleapis.com/dart-archive/channels/stable/release/${DART_VERSION}/sdk/dartsdk-linux-arm64-release.zip
+          fi
+          
+          # 解压Dart SDK
           unzip dartsdk-linux-arm64-release.zip
           
           # 替换Flutter中的Dart SDK
@@ -69,8 +89,8 @@ jobs:
           rm -rf temp_dart
           
           # 验证ARM64版本的Dart
-          file bin/cache/dart-sdk/bin/dart
-          bin/cache/dart-sdk/bin/dart --version
+          file bin/cache/dart-sdk/bin/dart || echo "无法识别Dart二进制文件"
+          bin/cache/dart-sdk/bin/dart --version || echo "无法执行Dart"
 
       # 下载depot_tools并准备构建Flutter引擎
       - name: 准备构建Flutter引擎
@@ -93,13 +113,15 @@ jobs:
           ]
           EOF
           
+          # 获取Flutter引擎版本
+          cd ..
+          ENGINE_VERSION=$(cat flutter-sdk/bin/internal/engine.version)
+          echo "使用引擎版本: ${ENGINE_VERSION}"
+          
           # 下载Flutter引擎源码
-          cd src
+          cd engine/src
           git clone https://github.com/flutter/engine.git flutter
           cd flutter
-          
-          # 获取对应的引擎版本
-          ENGINE_VERSION=$(cat ../../../flutter-sdk/bin/internal/engine.version)
           git checkout ${ENGINE_VERSION}
           
           # 同步依赖
@@ -148,7 +170,7 @@ jobs:
           cd flutter-sdk
           # 清理Git历史记录
           rm -rf .git
-          # 清理不必要的缓存文件
+          # 清理不必要的缓存文件，但保留必要结构
           rm -rf bin/cache/dart-sdk/lib/_internal/js_runtime
           rm -rf bin/cache/downloads
 
@@ -182,7 +204,7 @@ jobs:
         run: |
           SDK_VERSION="${{ github.event.inputs.flutter_version }}"
           if [[ "$SDK_VERSION" == "stable" || "$SDK_VERSION" == "beta" || "$SDK_VERSION" == "dev" || "$SDK_VERSION" == "master" ]]; then
-            SDK_VERSION=$(cd flutter-sdk && git describe --tags)
+            SDK_VERSION=$(cd flutter-sdk && bin/flutter --version | head -n 1 | awk '{print $2}')
           fi
           
           # 打包整个SDK
