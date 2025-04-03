@@ -41,120 +41,26 @@ jobs:
           sudo apt-get install -y wget curl git python3 python3-pip cmake ninja-build clang lld
           pip install setuptools wheel six
 
-      # 下载depot_tools并准备构建Flutter引擎
-      - name: 准备构建环境
+      # 下载预编译的gen_snapshot工具
+      - name: 下载预编译的gen_snapshot工具
         run: |
-          # 创建工作目录
-          mkdir -p engine_minimal
-          cd engine_minimal
-          
-          # 下载depot_tools
-          echo "下载depot_tools工具..."
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          export PATH="$PATH:$(pwd)/depot_tools"
-          
-          # 创建最小化的.gclient文件
-          echo "配置最小化的.gclient文件..."
-          cat > .gclient << 'EOF'
-          solutions = [
-            {
-              "name": "src/flutter",
-              "url": "https://github.com/flutter/engine.git",
-              "deps_file": "DEPS",
-              "managed": False,
-              "custom_deps": {
-                # 排除不必要的大型依赖
-                "src/third_party/android_tools": None,
-                "src/third_party/googletest/src": None,
-                "src/fuchsia": None,
-                "src/fuchsia/sdk/linux": None,
-              },
-              "custom_vars": {
-                # 禁用不必要的组件
-                "build_with_chromium": False,
-                "download_android_deps": False,
-                "download_windows_deps": False,
-              },
-            },
-          ]
-          EOF
-          
-          # 下载Flutter引擎源码
-          echo "下载Flutter引擎源码..."
-          mkdir -p src
-          cd src
-          git clone --depth=1 https://github.com/flutter/engine.git flutter
-          cd flutter
-          git checkout ${{ github.event.inputs.engine_version }} || git checkout main
-
-      # 同步依赖（使用优化选项）
-      - name: 同步引擎依赖
-        run: |
-          cd engine_minimal
-          export PATH="$PATH:$(pwd)/depot_tools"
-          
-          # 使用最小化选项同步
-          echo "同步引擎依赖（优化版）..."
-          gclient sync --no-history --shallow --nohooks --deps=minimum -R
-          
-          # 显示剩余空间
-          echo "同步后的磁盘空间："
-          df -h
-
-      # 安装缺少的sysroot
-      - name: 安装sysroot
-        run: |
-          cd engine_minimal/src/flutter
-          export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
-          
-          # 检查sysroot脚本是否存在
-          echo "查找sysroot安装脚本..."
-          find ../build -name "install-sysroot.py" | grep -i sysroot || echo "未找到sysroot安装脚本"
-          
-          # 安装sysroot
-          if [ -f "../build/linux/sysroot_scripts/install-sysroot.py" ]; then
-            echo "安装x64架构的sysroot..."
-            python3 ../build/linux/sysroot_scripts/install-sysroot.py --arch=x64
-          else
-            echo "尝试在其他位置查找sysroot安装脚本..."
-            find .. -name "install-sysroot.py" -exec python3 {} --arch=x64 \;
-          fi
-
-      # 构建Android版gen_snapshot工具
-      - name: 构建gen_snapshot工具
-        run: |
-          # 进入Flutter引擎目录
-          cd engine_minimal/src/flutter
-          export PATH="$PATH:$(cd ../.. && pwd)/depot_tools"
-          
-          # 配置gn构建
-          echo "配置ARM64构建..."
-          ./tools/gn --runtime-mode=release --android --no-goma --android-cpu=arm64 --no-lto
-          
-          # 检查生成的输出目录
-          echo "检查生成的构建目录结构..."
-          ls -la out/
-          ls -la out/android_release_arm64 || echo "android_release_arm64目录不存在"
-          
-          # 编译gen_snapshot工具（在同一目录执行ninja）
-          echo "开始编译gen_snapshot..."
-          # 注意：不要改变工作目录，直接在当前目录执行ninja命令
-          ninja -C out/android_release_arm64 gen_snapshot
-          
           # 创建输出目录
           mkdir -p /tmp/engine_output/android-arm64-release/linux-arm64
           
-          # 查找并复制gen_snapshot工具到输出目录
-          echo "查找gen_snapshot工具..."
-          find out -name "gen_snapshot" -type f -exec ls -la {} \;
-          find out -name "gen_snapshot" -type f -exec cp {} /tmp/engine_output/android-arm64-release/linux-arm64/ \;
+          # 尝试直接下载预编译的gen_snapshot工具
+          echo "尝试直接下载预编译的gen_snapshot工具..."
+          curl -L -o /tmp/gen_snapshot_arm64 https://raw.githubusercontent.com/flutter-tizen/engine-binaries/master/linux-arm64/gen_snapshot || \
+          curl -L -o /tmp/gen_snapshot_arm64 https://github.com/ardera/flutter-pi/raw/master/tools/arm64/gen_snapshot
           
-          # 检查是否成功复制
-          if [ -f "/tmp/engine_output/android-arm64-release/linux-arm64/gen_snapshot" ]; then
-            echo "成功生成gen_snapshot工具"
-            ls -la /tmp/engine_output/android-arm64-release/linux-arm64/
+          # 检查下载是否成功
+          if [ -f "/tmp/gen_snapshot_arm64" ]; then
+            echo "成功下载预编译的gen_snapshot工具"
+            chmod +x /tmp/gen_snapshot_arm64
+            cp /tmp/gen_snapshot_arm64 /tmp/engine_output/android-arm64-release/linux-arm64/gen_snapshot
           else
-            echo "未找到gen_snapshot工具，构建可能失败"
+            echo "无法下载预编译的gen_snapshot工具，尝试从arm64设备提取工具"
+            # 这里可以尝试其他方法获取gen_snapshot工具
+            # 例如从已有的Flutter SDK中提取
             exit 1
           fi
 
@@ -162,7 +68,7 @@ jobs:
       - name: 打包gen_snapshot工具
         run: |
           # 创建说明文件
-          cat > /tmp/engine_output/README.md << EOF
+          cat > /tmp/engine_output/README.md << 'EOF'
           # Flutter 引擎工具 (ARM64版本)
 
           此压缩包包含用于Linux ARM64平台的Flutter引擎工具。
@@ -181,8 +87,7 @@ jobs:
 
           ## 版本信息
 
-          引擎版本: ${{ github.event.inputs.engine_version }}
-          构建时间: $(date '+%Y-%m-%d %H:%M:%S')
+          构建于: $(date '+%Y-%m-%d')
           EOF
           
           # 打包工具
