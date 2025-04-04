@@ -1,187 +1,91 @@
-# 工作流名称
-name: 构建Flutter ARM64引擎工具
+name: 构建Flutter Engine Android ARM64
 
-# 触发条件：手动触发
 on:
-  workflow_dispatch:
-    inputs:
-      flutter_version:
-        description: 'Flutter版本(例如:3.19.3)'
-        default: 'stable'
-        required: true
+  workflow_dispatch:  # 允许手动触发工作流
+  push:
+    branches: [ main ]  # 当推送到main分支时触发
+  pull_request:
+    branches: [ main ]  # 当PR针对main分支时触发
 
 jobs:
-  build-engine:
-    # 使用Ubuntu最新版本作为构建环境
+  build:
     runs-on: ubuntu-latest
     
     steps:
-      # 释放磁盘空间
-      - name: 释放磁盘空间
-        run: |
-          # 清理系统以释放空间
-          echo "正在释放磁盘空间..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo apt-get remove --purge -y '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*'
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          
-          # 显示可用空间
-          df -h
-
-      # 下载官方Flutter SDK
-      - name: 下载Flutter SDK
-        run: |
-          # 下载官方Flutter SDK
-          echo "下载Flutter SDK..."
-          wget -q https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${{ github.event.inputs.flutter_version }}-stable.tar.xz
-          tar xf flutter_linux_${{ github.event.inputs.flutter_version }}-stable.tar.xz
-          
-          # 设置环境变量
-          export PATH="$PATH:$(pwd)/flutter/bin"
-          flutter --version
-          
-          # 检查是否存在gen_snapshot工具
-          echo "检查官方SDK中的gen_snapshot..."
-          find flutter -name "gen_snapshot" -type f | grep -i arm
-
-      # 从商店下载ARM64设备映像
-      - name: 下载ARM64设备映像
-        run: |
-          echo "下载ARM64设备映像..."
-          # 安装QEMU和相关工具
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-
-          # 下载Debian ARM64 rootfs (使用预制的轻量镜像)
-          wget -q https://github.com/multiarch/qemu-user-static/releases/download/v7.0.0-7/qemu-aarch64-static
-          chmod +x qemu-aarch64-static
-          
-          # 创建目录结构
-          mkdir -p arm64_rootfs/usr/bin
-          cp qemu-aarch64-static arm64_rootfs/usr/bin/
-
-          # 获取最小化的ARM64 rootfs
-          wget -q https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-arm64v8/bullseye/slim/rootfs.tar.xz
-          tar -xf rootfs.tar.xz -C arm64_rootfs
-
-      # 从Flutter项目中提取gen_snapshot
-      - name: 从Flutter SDK和ARM64设备获取gen_snapshot
-        run: |
-          # 设置目录结构
-          mkdir -p output/android-arm64-release/linux-arm64
-          
-          # 方法1: 尝试从ARM64设备中提取gen_snapshot
-          echo "尝试提取arm64设备gen_snapshot工具..."
-          
-          # 准备chroot环境
-          sudo mkdir -p arm64_rootfs/flutter
-          sudo cp -r flutter arm64_rootfs/flutter
-          
-          # 在ARM64环境中下载并测试gen_snapshot
-          sudo chroot arm64_rootfs /usr/bin/qemu-aarch64-static /bin/bash -c "
-            apt-get update || true
-            apt-get install -y curl wget unzip || true
-            cd /flutter/bin/cache
-            echo '获取snapshot工具...'
-            wget -O engine.zip https://storage.googleapis.com/flutter_infra_release/flutter_infra_release/engine/linux-arm64/linux-arm64-release.zip || echo 下载失败
-            unzip -o engine.zip || echo 解压失败
-            find . -name 'gen_snapshot' -type f
-          "
-          
-          # 寻找和复制gen_snapshot
-          find arm64_rootfs -name "gen_snapshot" -type f -exec ls -la {} \;
-          sudo find arm64_rootfs -name "gen_snapshot" -type f -exec cp {} output/android-arm64-release/linux-arm64/ \; || true
-          
-          # 方法2: 下载预编译的gen_snapshot
-          if [ ! -f "output/android-arm64-release/linux-arm64/gen_snapshot" ]; then
-            echo "尝试从预编译源下载gen_snapshot..."
-            curl -L -o output/android-arm64-release/linux-arm64/gen_snapshot https://github.com/ardera/flutter-pi/raw/master/tools/arm64/gen_snapshot || \
-            curl -L -o output/android-arm64-release/linux-arm64/gen_snapshot https://github.com/flutter-tizen/engine-binaries/raw/master/linux-arm64/gen_snapshot
-            # 设置执行权限
-            chmod +x output/android-arm64-release/linux-arm64/gen_snapshot
-          fi
-          
-          # 检查文件大小和有效性
-          ls -la output/android-arm64-release/linux-arm64/gen_snapshot || echo "文件不存在"
-          file_size=$(stat -c%s "output/android-arm64-release/linux-arm64/gen_snapshot" 2>/dev/null || echo "0")
-          echo "gen_snapshot文件大小: $file_size 字节"
-          
-          if [ "$file_size" -lt "1000000" ]; then
-            echo "警告: gen_snapshot文件小于1MB，可能不是有效的工具"
-          fi
-          
-          # 文件类型检查
-          file output/android-arm64-release/linux-arm64/gen_snapshot || echo "无法识别文件类型"
-
-      # 创建自定义README文件
-      - name: 创建说明文件
-        run: |
-          cat > output/README.md << 'EOF'
-          # Flutter ARM64 引擎工具
-
-          此压缩包包含用于 Linux ARM64 平台的 Flutter 引擎工具。
-
-          ## 目录结构
-
-          该压缩包包含以下文件:
-          - android-arm64-release/linux-arm64/gen_snapshot: 用于ARM64平台的代码生成工具
-
-          ## 使用方法
-
-          1. 将文件复制到Flutter SDK的对应目录:
-          ```bash
-          # 创建目标目录（如果不存在）
-          mkdir -p ~/flutter/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/
-          
-          # 复制gen_snapshot工具
-          cp android-arm64-release/linux-arm64/gen_snapshot ~/flutter/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/
-          
-          # 确保工具有执行权限
-          chmod +x ~/flutter/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot
-          ```
-
-          2. 现在您可以在ARM64平台上构建发布版Flutter应用了:
-          ```bash
-          flutter build apk --release
-          ```
-
-          ## 注意事项
-
-          此工具专为Linux ARM64架构设计，用于解决在ARM64设备上构建Flutter应用时的兼容性问题。
-          EOF
-
-      # 打包gen_snapshot工具
-      - name: 打包gen_snapshot工具
-        run: |
-          # 检查工具是否有效
-          if [ ! -f "output/android-arm64-release/linux-arm64/gen_snapshot" ]; then
-            echo "错误: 没有找到有效的gen_snapshot工具"
-            exit 1
-          fi
-          
-          # 显示文件信息
-          file_size=$(stat -c%s "output/android-arm64-release/linux-arm64/gen_snapshot")
-          echo "打包gen_snapshot工具，文件大小: ${file_size}字节"
-          
-          # 打包工具
-          tar -czf flutter-engine-arm64.tar.gz -C output .
-          
-          # 检查压缩包大小
-          compressed_size=$(stat -c%s "flutter-engine-arm64.tar.gz") 
-          echo "压缩包大小: ${compressed_size}字节"
-          
-          # 确认压缩包有效性
-          if [ "$compressed_size" -lt "1000000" ]; then
-            echo "警告: 压缩包小于1MB，可能无效"
-          fi
-
-      # 上传构建产物
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+      - name: 检出代码
+        uses: actions/checkout@v3
+      
+      - name: 设置Python
+        uses: actions/setup-python@v4
         with:
-          name: flutter-engine-arm64
-          path: flutter-engine-arm64.tar.gz
-          retention-days: 7
+          python-version: '3.8'
+      
+      - name: 安装依赖项
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl git unzip xz-utils zip libglu1-mesa-dev gcc g++ pkg-config
+          sudo apt-get install -y lib32stdc++6 libstdc++6 libncurses5
+          sudo apt-get install -y ninja-build cmake clang
+      
+      - name: 安装JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '11'
+      
+      - name: 安装depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "PATH=$PWD/depot_tools:$PATH" >> $GITHUB_ENV
+      
+      - name: 获取Flutter Engine仓库
+        run: |
+          mkdir -p flutter-engine && cd flutter-engine
+          cat > .gclient <<EOF
+          solutions = [
+            {
+              "managed": False,
+              "name": "src/flutter",
+              "url": "https://github.com/flutter/engine.git",
+              "custom_deps": {},
+              "deps_file": "DEPS",
+              "safesync_url": "",
+            },
+          ]
+          EOF
+          gclient sync
+      
+      - name: 配置Android SDK
+        run: |
+          mkdir -p android-sdk
+          cd android-sdk
+          wget https://dl.google.com/android/repository/commandlinetools-linux-8092744_latest.zip
+          unzip commandlinetools-linux-8092744_latest.zip
+          mkdir -p cmdline-tools/latest
+          mv cmdline-tools/* cmdline-tools/latest/ || true
+          rm -rf cmdline-tools/latest/cmdline-tools || true
+          echo "ANDROID_HOME=$PWD" >> $GITHUB_ENV
+          echo "PATH=$PWD/cmdline-tools/latest/bin:$PWD/platform-tools:$PATH" >> $GITHUB_ENV
+          
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-30" "build-tools;30.0.3" "ndk;25.1.8937393"
+      
+      - name: 配置构建参数
+        run: |
+          cd flutter-engine/src
+          ./flutter/tools/gn --runtime-mode=release --android --android-cpu=arm64
+      
+      - name: 编译Flutter Engine
+        run: |
+          cd flutter-engine/src
+          ninja -C out/android_release_arm64
+      
+      - name: 导出编译产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: flutter-engine-android-arm64
+          path: |
+            flutter-engine/src/out/android_release_arm64/clang_x64
+            flutter-engine/src/out/android_release_arm64/gen
+            flutter-engine/src/out/android_release_arm64/*.so
+            flutter-engine/src/out/android_release_arm64/*.jar
