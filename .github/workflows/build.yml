@@ -19,11 +19,24 @@ on:
 jobs:
   build:
     name: 构建Linux ARM64版本引擎
+    # 使用具有更大磁盘空间的运行器
     runs-on: ubuntu-latest
     
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        run: |
+          # 删除不必要的大型预安装软件包以释放空间
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # 显示剩余磁盘空间
+          echo "初始磁盘空间状态："
+          df -h
 
       - name: 安装依赖项
         run: |
@@ -45,7 +58,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 下载Flutter Engine源码
+      - name: 下载精简版Flutter Engine源码
         run: |
           # 创建工作目录
           mkdir -p engine/src
@@ -56,46 +69,80 @@ jobs:
           cd flutter
           git checkout ${{ github.event.inputs.flutter_engine_version || 'main' }}
           
+          # 设置环境变量以减少依赖项
+          echo "export FLUTTER_GOMA=none" >> $GITHUB_ENV
+          
           # 返回到src目录
           cd ..
           
-          # 创建用于gclient的配置文件
+          # 创建精简版.gclient配置文件，排除不需要的组件
           cat > .gclient <<EOF
           solutions = [
             {
               "managed": False,
               "name": "flutter",
               "url": "https://github.com/flutter/engine.git",
-              "custom_deps": {},
+              "custom_deps": {
+                # 排除不必要的大型依赖
+                "src/third_party/android_tools": None,
+                "src/third_party/chromium_android_sdk": None,
+                "src/third_party/fuchsia_sdk": None,
+                "src/fuchsia/sdk/linux": None,
+              },
               "deps_file": "DEPS",
               "safesync_url": "",
             },
           ]
+          target_os = ["linux"]
+          target_cpu = ["arm64"]
           EOF
           
-          # 使用depot_tools中的gclient同步依赖
-          gclient sync -D
+          # 显示磁盘空间状态
+          df -h
+          
+          # 使用depot_tools中的gclient同步依赖，添加参数减少下载量
+          gclient sync -D --no-history --shallow --nohooks
+
+          # 显示同步后的磁盘空间
+          df -h
 
       - name: 生成构建文件
         run: |
           cd engine/src
-          # 配置ARM64构建
-          ./flutter/tools/gn --target-os=linux --target-cpu=arm64 --runtime-mode=release --no-lto --no-goma
+          # 配置ARM64构建，添加禁用参数减少依赖
+          ./flutter/tools/gn \
+            --target-os=linux \
+            --target-cpu=arm64 \
+            --runtime-mode=release \
+            --no-lto \
+            --no-goma \
+            --disable-desktop-embeddings \
+            --no-build-embedder-examples \
+            --disable-desktop-embeddings \
+            --disable-android \
+            --disable-fuchsia \
+            --no-enable-vulkan \
+            --no-enable-metal
 
       - name: 编译Flutter Engine
         run: |
           cd engine/src
-          ninja -C out/linux_release_arm64
+          # 显示构建前的磁盘空间
+          df -h
+          # 构建引擎
+          ninja -C out/linux_release_arm64 -j2
 
       - name: 打包产物
         run: |
           cd engine/src
           mkdir -p flutter_engine_artifacts
-          # 复制编译好的so文件和相关资源
-          cp -r out/linux_release_arm64/so/lib/*.so flutter_engine_artifacts/ || echo "未找到so文件，可能是输出路径不同"
-          cp out/linux_release_arm64/flutter_embedder.h flutter_engine_artifacts/ || echo "未找到flutter_embedder.h文件"
           # 列出编译产物文件夹结构，方便调试
-          find out/linux_release_arm64 -type f -name "*.so" | sort
+          find out/linux_release_arm64 -name "*.so" | sort
+          
+          # 复制编译好的lib文件和相关资源
+          cp -r out/linux_release_arm64/lib*.so flutter_engine_artifacts/ || echo "未找到库文件"
+          cp out/linux_release_arm64/flutter_embedder.h flutter_engine_artifacts/ || echo "未找到flutter_embedder.h文件"
+          
           # 压缩产物
           tar -czvf flutter_engine_linux_arm64.tar.gz flutter_engine_artifacts
 
