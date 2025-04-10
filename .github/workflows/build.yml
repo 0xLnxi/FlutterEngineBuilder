@@ -69,9 +69,6 @@ jobs:
           cd flutter
           git checkout ${{ github.event.inputs.flutter_engine_version || 'main' }}
           
-          # 设置环境变量以减少依赖项
-          echo "export FLUTTER_GOMA=none" >> $GITHUB_ENV
-          
           # 返回到src目录
           cd ..
           
@@ -86,15 +83,12 @@ jobs:
                 # 排除不必要的大型依赖
                 "src/third_party/android_tools": None,
                 "src/third_party/chromium_android_sdk": None,
-                "src/third_party/fuchsia_sdk": None,
-                "src/fuchsia/sdk/linux": None,
               },
               "deps_file": "DEPS",
               "safesync_url": "",
             },
           ]
           target_os = ["linux"]
-          target_cpu = ["arm64"]
           EOF
           
           # 显示磁盘空间状态
@@ -109,27 +103,22 @@ jobs:
       - name: 生成构建文件
         run: |
           cd engine/src
-          # 配置ARM64构建，添加禁用参数减少依赖
+          # 配置ARM64构建，使用正确的参数
           ./flutter/tools/gn \
             --target-os=linux \
-            --target-cpu=arm64 \
+            --linux-cpu=arm64 \
             --runtime-mode=release \
             --no-lto \
             --no-goma \
             --disable-desktop-embeddings \
-            --no-build-embedder-examples \
-            --disable-desktop-embeddings \
-            --disable-android \
-            --disable-fuchsia \
-            --no-enable-vulkan \
-            --no-enable-metal
+            --no-build-embedder-examples
 
       - name: 编译Flutter Engine
         run: |
           cd engine/src
           # 显示构建前的磁盘空间
           df -h
-          # 构建引擎
+          # 构建引擎，限制并发数量减少内存使用
           ninja -C out/linux_release_arm64 -j2
 
       - name: 打包产物
