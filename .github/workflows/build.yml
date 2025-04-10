@@ -1,34 +1,27 @@
 name: Build Flutter Engine (Linux ARM64)
 
 on:
-  # Trigger on pushes to the main branch (adjust if your workflow repo is different)
   push:
     branches:
       - main
-  # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch:
 
-# Set default shell to bash for all run steps
 defaults:
   run:
     shell: bash
 
 env:
-  # Define the directory where the engine source and build will reside
-  ENGINE_SRC_DIR: ${{ github.workspace }}/engine_src
-  # Define depot_tools path
+  ENGINE_SRC_DIR: ${{ github.workspace }}/engine # Renamed for clarity, often engine resides here
   DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
 
 jobs:
   build_linux_arm64:
     name: Build Flutter Engine for Linux ARM64 (Release)
-    # Use the latest stable Ubuntu runner provided by GitHub
     runs-on: ubuntu-latest
-    # Engine builds can take time, default timeout is 6 hours, should be enough
     # timeout-minutes: 360
 
     steps:
-      - name: Maximize build space # Free up disk space on the runner
+      - name: Maximize build space
         uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 512
@@ -36,93 +29,110 @@ jobs:
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
-          # Keep other potentially useful tools
 
       - name: Checkout workflow code (optional)
         uses: actions/checkout@v4
-        # Check out the repo containing this workflow file if needed
 
       - name: Set up Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x' # Flutter build tools require Python 3
+          python-version: '3.x'
 
       - name: Install depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ env.DEPOT_TOOLS_DIR }}
-          echo "${{ env.DEPOT_TOOLS_DIR }}" >> $GITHUB_PATH # Add depot_tools to PATH
+          echo "${{ env.DEPOT_TOOLS_DIR }}" >> $GITHUB_PATH
 
       - name: Verify depot_tools installation
         run: |
           gclient --version
-          echo "depot_tools installed at: $(which gclient)"
 
-      # Cache depot_tools and gclient dependencies for faster subsequent runs
-      # The key includes the OS and a hash of the required python version (as a proxy for setup)
-      - name: Cache gclient dependencies
+      # Cache depot_tools itself and gclient dependencies
+      # Cache depot_tools installation
+      - name: Cache depot_tools
+        id: cache-depot-tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPOT_TOOLS_DIR }}
+          key: ${{ runner.os }}-depot-tools-${{ hashFiles('**/requirements.txt') }} # Example key, adjust if needed
+
+      # Cache gclient's view of the world (helps speed up sync)
+      - name: Cache gclient configuration and state
         id: gclient-cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.ENGINE_SRC_DIR }}/.gclient_entries # Cache gclient state
-          key: ${{ runner.os }}-gclient-${{ hashFiles('**/DEPS', '.gclient') }} # Adjust key if needed
+          path: |
+            ${{ env.ENGINE_SRC_DIR }}/.gclient
+            ${{ env.ENGINE_SRC_DIR }}/.gclient_entries
+          # Key includes OS and a marker for the engine repo URL
+          key: ${{ runner.os }}-gclient-config-${{ github.sha }} # Use commit SHA for more specific caching if desired
           restore-keys: |
-            ${{ runner.os }}-gclient-
+            ${{ runner.os }}-gclient-config-
 
       - name: Configure gclient for Flutter Engine
         run: |
+          # Ensure the parent directory exists and is clean IF NOT using cache effectively
+          # rm -rf ${{ env.ENGINE_SRC_DIR }} # Uncomment if you want a forced clean slate every time
           mkdir -p ${{ env.ENGINE_SRC_DIR }}
           cd ${{ env.ENGINE_SRC_DIR }}
-          # Configure gclient to manage the engine repository
-          # Using --unmanaged as we often check out specific commits/tags manually later if needed
-          gclient config --unmanaged https://github.com/flutter/engine.git --name=src
-          # Add flutter dependency explicitly (good practice)
-          echo "target_os = ['linux', 'android']" >> .gclient # Include 'android' as some linux build deps might rely on it
-          # Optional: Add custom DEPS for specific versions if needed
-          # echo "solutions = [ ..." >> .gclient
+          # Standard way to configure for Flutter Engine. 'src' is the default solution name.
+          gclient config https://github.com/flutter/engine.git
+          # Add target_os AFTER config but BEFORE sync
+          echo "target_os = ['linux', 'android']" >> .gclient
 
-      - name: Sync Flutter Engine source and dependencies
+      - name: Sync Flutter Engine source and dependencies (with retry)
         run: |
           cd ${{ env.ENGINE_SRC_DIR }}
           # Use -D to delete unversioned files, --with_branch_heads/tags for correct DEPS resolution
-          # Add retry logic as network issues can interrupt gclient sync
-          for i in 1 2 3; do # Retry up to 3 times
-            gclient sync --with_branch_heads --with_tags -D --force --jobs=10 && break # Use multiple jobs, force sync
-            echo "gclient sync failed, retrying ($i)..."
+          # Add retry logic
+          RETRY_COUNT=0
+          MAX_RETRIES=3
+          SYNC_SUCCESS=false
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Attempting gclient sync ($((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+            # Removed --force initially, add back if needed, but can sometimes hide issues
+            # Use --reset to revert local changes which might interfere after failed syncs
+            gclient sync --with_branch_heads --with_tags -D --reset --jobs=10
+            if [ $? -eq 0 ]; then
+              SYNC_SUCCESS=true
+              break
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "gclient sync failed, retrying in 15 seconds..."
             sleep 15
           done
-          # Ensure sync succeeded after retries
-          if [ $? -ne 0 ]; then
-            echo "::error::gclient sync failed after multiple retries."
+
+          if [ "$SYNC_SUCCESS" = false ]; then
+            echo "::error::gclient sync failed after $MAX_RETRIES attempts."
             exit 1
           fi
+          echo "gclient sync completed successfully."
 
       # Optional: Checkout a specific Flutter engine tag/branch/commit AFTER sync
       # - name: Checkout Specific Engine Version
       #   run: |
       #     cd ${{ env.ENGINE_SRC_DIR }}/src
       #     git fetch --tags
-      #     git checkout flutter-3.19.0 # Example: Checkout a specific stable tag
+      #     git checkout flutter-3.19.0 # Example
+      #     cd .. # Go back to ENGINE_SRC_DIR
       #     # Re-run gclient sync after checkout to align dependencies
-      #     cd ..
-      #     gclient sync --with_branch_heads --with_tags -D --force --jobs=10
+      #     gclient sync --with_branch_heads --with_tags -D --reset --jobs=10
 
       - name: Install Linux ARM64 build dependencies
         run: |
+          # CRITICAL: Ensure you are in the 'src' directory checked out by gclient
           cd ${{ env.ENGINE_SRC_DIR }}/src
-          # This script installs necessary sysroot and toolchains for cross-compiling
-          # It might require sudo privileges, which are available passwordless on GitHub runners
-          sudo ./build/install-build-deps.sh --arm --no-armhf # Install ARM64 deps, skip ARM32
-          # Optional: Add --no-chromeos-fonts, --no-nacl if you are sure they are not needed
+          pwd # Print current directory for verification
+          ls -la build/ # Check if the build directory and script exist
+          # Now run the script
+          sudo ./build/install-build-deps.sh --arm --no-armhf
+          # Optional flags if needed: --no-chromeos-fonts, --no-nacl
 
-      # Cache the build output directory to speed up incremental builds (if possible)
-      # Key includes source hash (approximated by gclient cache key) and build config
       - name: Cache Build Output Directory (Linux ARM64 Release)
         id: build-cache-linux-arm64
         uses: actions/cache@v4
         with:
-          # Path to the expected output directory
           path: ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64
-          # Key depends on the source state (gclient cache key) and the build configuration
           key: ${{ runner.os }}-linux-arm64-release-build-${{ steps.gclient-cache.outputs.cache-hit }}-${{ hashFiles(format('{0}/src/flutter/tools/gn', env.ENGINE_SRC_DIR), format('{0}/src/DEPS', env.ENGINE_SRC_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-linux-arm64-release-build-${{ steps.gclient-cache.outputs.cache-hit }}-
@@ -130,19 +140,16 @@ jobs:
 
       - name: Generate build files (GN) for Linux ARM64 Release
         run: |
+          # CRITICAL: Ensure you are in the 'src' directory
           cd ${{ env.ENGINE_SRC_DIR }}/src
           # Generate Ninja files for a release build targeting linux-arm64
-          # --no-lto: Disables Link Time Optimization for faster builds (remove for potentially smaller/faster binary)
-          # --goma: If you have goma configured (unlikely in public Actions), otherwise ignored.
           ./flutter/tools/gn --linux-cpu=arm64 --runtime-mode=release --no-lto --no-goma
-          # Output directory will be out/linux_release_arm64
 
       - name: Compile Flutter Engine (Ninja) for Linux ARM64 Release
         run: |
+          # CRITICAL: Ensure you are in the 'src' directory
           cd ${{ env.ENGINE_SRC_DIR }}/src
-          # Use autoninja (part of depot_tools) which automatically parallelizes the build
-          autoninja -C out/linux_release_arm64 :flutter_linux_gtk # Build the GTK embedder target
-          # Alternative: Build all default targets: autoninja -C out/linux_release_arm64
+          autoninja -C out/linux_release_arm64 :flutter_linux_gtk
 
       - name: List key build artifacts
         run: |
@@ -152,19 +159,17 @@ jobs:
           ls -la icudtl.dat || echo "icudtl.dat not found"
           ls -la gen_snapshot || echo "gen_snapshot not found"
           ls -la flutter_patched_sdk || echo "flutter_patched_sdk directory not found"
-          ls -la flutter_patched_sdk_product || echo "flutter_patched_sdk_product directory not found" # Sometimes needed
+          ls -la flutter_patched_sdk_product || echo "flutter_patched_sdk_product directory not found"
 
       - name: Upload Linux ARM64 Release Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: flutter-engine-linux-arm64-release
-          # Define the paths to the artifacts you want to upload
           path: |
             ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/libflutter_linux_gtk.so
             ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/icudtl.dat
             ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/gen_snapshot
             ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/flutter_patched_sdk/
-            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/flutter_patched_sdk_product/ # Include if needed
-            # Add any other required artifacts here
-          retention-days: 7 # Keep artifacts for 7 days (adjust as needed)
-          if-no-files-found: error # Fail the step if specified files are missing
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/flutter_patched_sdk_product/
+          retention-days: 7
+          if-no-files-found: error
