@@ -35,46 +35,36 @@ jobs:
 
       - name: 设置depot_tools
         run: |
+          # 克隆depot_tools仓库
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$(pwd)/depot_tools" >> $GITHUB_PATH
+          # 将depot_tools添加到PATH
+          echo "PATH=$(pwd)/depot_tools:$PATH" >> $GITHUB_ENV
 
       - name: 设置Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          # 删除了cache: 'pip'选项，因为没有requirements.txt文件
-
-      - name: 缓存Flutter Engine
-        id: cache-engine-source
-        uses: actions/cache@v4
-        with:
-          path: engine
-          key: flutter-engine-${{ github.event.inputs.flutter_engine_version || 'main' }}-${{ hashFiles('engine/.git/HEAD') }}
-          restore-keys: |
-            flutter-engine-${{ github.event.inputs.flutter_engine_version || 'main' }}-
 
       - name: 下载Flutter Engine源码
-        if: steps.cache-engine-source.outputs.cache-hit != 'true'
         run: |
-          mkdir -p engine
-          cd engine
-          # 获取Flutter Engine代码
-          git clone https://github.com/flutter/engine.git src/flutter
-          cd src/flutter
-          git checkout ${{ github.event.inputs.flutter_engine_version || 'main' }}
-          # 获取引擎依赖的代码
-          cd ..
-          flutter/tools/gclient sync -D
-
-      - name: 配置构建环境
-        run: |
+          # 创建工作目录
+          mkdir -p engine/src
           cd engine/src
-          # 创建用于ARM64构建的gclient配置
+          
+          # 获取Flutter Engine代码
+          git clone https://github.com/flutter/engine.git flutter
+          cd flutter
+          git checkout ${{ github.event.inputs.flutter_engine_version || 'main' }}
+          
+          # 返回到src目录
+          cd ..
+          
+          # 创建用于gclient的配置文件
           cat > .gclient <<EOF
           solutions = [
             {
               "managed": False,
-              "name": "src/flutter",
+              "name": "flutter",
               "url": "https://github.com/flutter/engine.git",
               "custom_deps": {},
               "deps_file": "DEPS",
@@ -82,6 +72,9 @@ jobs:
             },
           ]
           EOF
+          
+          # 使用depot_tools中的gclient同步依赖
+          gclient sync -D
 
       - name: 生成构建文件
         run: |
@@ -99,8 +92,10 @@ jobs:
           cd engine/src
           mkdir -p flutter_engine_artifacts
           # 复制编译好的so文件和相关资源
-          cp -r out/linux_release_arm64/so/lib/*.so flutter_engine_artifacts/
-          cp -r out/linux_release_arm64/flutter_embedder.h flutter_engine_artifacts/
+          cp -r out/linux_release_arm64/so/lib/*.so flutter_engine_artifacts/ || echo "未找到so文件，可能是输出路径不同"
+          cp out/linux_release_arm64/flutter_embedder.h flutter_engine_artifacts/ || echo "未找到flutter_embedder.h文件"
+          # 列出编译产物文件夹结构，方便调试
+          find out/linux_release_arm64 -type f -name "*.so" | sort
           # 压缩产物
           tar -czvf flutter_engine_linux_arm64.tar.gz flutter_engine_artifacts
 
