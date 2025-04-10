@@ -1,155 +1,170 @@
-name: 构建Flutter Engine (Linux ARM64)
+name: Build Flutter Engine (Linux ARM64)
 
 on:
-  # 手动触发工作流
-  workflow_dispatch:
-    inputs:
-      flutter_engine_version:
-        description: 'Flutter Engine版本(分支或标签)'
-        required: true
-        default: 'main'
-        type: string
-  # 定时构建，每周一早上6点
-  schedule:
-    - cron: '0 6 * * 1'
-  # 当推送到主分支时触发
+  # Trigger on pushes to the main branch (adjust if your workflow repo is different)
   push:
-    branches: [ main ]
+    branches:
+      - main
+  # Allow manual triggering from the GitHub Actions UI
+  workflow_dispatch:
+
+# Set default shell to bash for all run steps
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Define the directory where the engine source and build will reside
+  ENGINE_SRC_DIR: ${{ github.workspace }}/engine_src
+  # Define depot_tools path
+  DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
 
 jobs:
-  build:
-    name: 构建Linux ARM64版本引擎
-    # 使用具有更大磁盘空间的运行器
+  build_linux_arm64:
+    name: Build Flutter Engine for Linux ARM64 (Release)
+    # Use the latest stable Ubuntu runner provided by GitHub
     runs-on: ubuntu-latest
-    
+    # Engine builds can take time, default timeout is 6 hours, should be enough
+    # timeout-minutes: 360
+
     steps:
-      - name: 检出仓库代码
+      - name: Maximize build space # Free up disk space on the runner
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          # Keep other potentially useful tools
+
+      - name: Checkout workflow code (optional)
         uses: actions/checkout@v4
+        # Check out the repo containing this workflow file if needed
 
-      - name: 释放磁盘空间
-        run: |
-          # 删除不必要的大型预安装软件包以释放空间
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # 显示剩余磁盘空间
-          echo "初始磁盘空间状态："
-          df -h
-
-      - name: 安装依赖项
-        run: |
-          sudo apt-get update
-          # 安装编译依赖
-          sudo apt-get install -y curl git unzip python3 python3-pip pkg-config cmake ninja-build clang libgtk-3-dev liblzma-dev libstdc++-10-dev
-          # 安装ARM64交叉编译工具
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: 设置depot_tools
-        run: |
-          # 克隆depot_tools仓库
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          # 将depot_tools添加到PATH
-          echo "PATH=$(pwd)/depot_tools:$PATH" >> $GITHUB_ENV
-
-      - name: 设置Python
+      - name: Set up Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.x' # Flutter build tools require Python 3
 
-      - name: 下载精简版Flutter Engine源码
+      - name: Install depot_tools
         run: |
-          # 创建工作目录
-          mkdir -p engine/src
-          cd engine/src
-          
-          # 获取Flutter Engine代码
-          git clone https://github.com/flutter/engine.git flutter
-          cd flutter
-          git checkout ${{ github.event.inputs.flutter_engine_version || 'main' }}
-          
-          # 返回到src目录
-          cd ..
-          
-          # 创建精简版.gclient配置文件，排除不需要的组件
-          cat > .gclient <<EOF
-          solutions = [
-            {
-              "managed": False,
-              "name": "flutter",
-              "url": "https://github.com/flutter/engine.git",
-              "custom_deps": {
-                # 排除不必要的大型依赖
-                "src/third_party/android_tools": None,
-                "src/third_party/chromium_android_sdk": None,
-              },
-              "deps_file": "DEPS",
-              "safesync_url": "",
-            },
-          ]
-          target_os = ["linux"]
-          EOF
-          
-          # 显示磁盘空间状态
-          df -h
-          
-          # 使用depot_tools中的gclient同步依赖，添加参数减少下载量
-          gclient sync -D --no-history --shallow --nohooks
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ env.DEPOT_TOOLS_DIR }}
+          echo "${{ env.DEPOT_TOOLS_DIR }}" >> $GITHUB_PATH # Add depot_tools to PATH
 
-          # 显示同步后的磁盘空间
-          df -h
-
-      - name: 生成构建文件
+      - name: Verify depot_tools installation
         run: |
-          cd engine/src
-          # 配置ARM64构建，使用正确的参数
-          ./flutter/tools/gn \
-            --target-os=linux \
-            --linux-cpu=arm64 \
-            --runtime-mode=release \
-            --no-lto \
-            --no-goma \
-            --disable-desktop-embeddings \
-            --no-build-embedder-examples
+          gclient --version
+          echo "depot_tools installed at: $(which gclient)"
 
-      - name: 编译Flutter Engine
+      # Cache depot_tools and gclient dependencies for faster subsequent runs
+      # The key includes the OS and a hash of the required python version (as a proxy for setup)
+      - name: Cache gclient dependencies
+        id: gclient-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ENGINE_SRC_DIR }}/.gclient_entries # Cache gclient state
+          key: ${{ runner.os }}-gclient-${{ hashFiles('**/DEPS', '.gclient') }} # Adjust key if needed
+          restore-keys: |
+            ${{ runner.os }}-gclient-
+
+      - name: Configure gclient for Flutter Engine
         run: |
-          cd engine/src
-          # 显示构建前的磁盘空间
-          df -h
-          # 构建引擎，限制并发数量减少内存使用
-          ninja -C out/linux_release_arm64 -j2
+          mkdir -p ${{ env.ENGINE_SRC_DIR }}
+          cd ${{ env.ENGINE_SRC_DIR }}
+          # Configure gclient to manage the engine repository
+          # Using --unmanaged as we often check out specific commits/tags manually later if needed
+          gclient config --unmanaged https://github.com/flutter/engine.git --name=src
+          # Add flutter dependency explicitly (good practice)
+          echo "target_os = ['linux', 'android']" >> .gclient # Include 'android' as some linux build deps might rely on it
+          # Optional: Add custom DEPS for specific versions if needed
+          # echo "solutions = [ ..." >> .gclient
 
-      - name: 打包产物
+      - name: Sync Flutter Engine source and dependencies
         run: |
-          cd engine/src
-          mkdir -p flutter_engine_artifacts
-          # 列出编译产物文件夹结构，方便调试
-          find out/linux_release_arm64 -name "*.so" | sort
-          
-          # 复制编译好的lib文件和相关资源
-          cp -r out/linux_release_arm64/lib*.so flutter_engine_artifacts/ || echo "未找到库文件"
-          cp out/linux_release_arm64/flutter_embedder.h flutter_engine_artifacts/ || echo "未找到flutter_embedder.h文件"
-          
-          # 压缩产物
-          tar -czvf flutter_engine_linux_arm64.tar.gz flutter_engine_artifacts
+          cd ${{ env.ENGINE_SRC_DIR }}
+          # Use -D to delete unversioned files, --with_branch_heads/tags for correct DEPS resolution
+          # Add retry logic as network issues can interrupt gclient sync
+          for i in 1 2 3; do # Retry up to 3 times
+            gclient sync --with_branch_heads --with_tags -D --force --jobs=10 && break # Use multiple jobs, force sync
+            echo "gclient sync failed, retrying ($i)..."
+            sleep 15
+          done
+          # Ensure sync succeeded after retries
+          if [ $? -ne 0 ]; then
+            echo "::error::gclient sync failed after multiple retries."
+            exit 1
+          fi
 
-      - name: 上传构建产物
+      # Optional: Checkout a specific Flutter engine tag/branch/commit AFTER sync
+      # - name: Checkout Specific Engine Version
+      #   run: |
+      #     cd ${{ env.ENGINE_SRC_DIR }}/src
+      #     git fetch --tags
+      #     git checkout flutter-3.19.0 # Example: Checkout a specific stable tag
+      #     # Re-run gclient sync after checkout to align dependencies
+      #     cd ..
+      #     gclient sync --with_branch_heads --with_tags -D --force --jobs=10
+
+      - name: Install Linux ARM64 build dependencies
+        run: |
+          cd ${{ env.ENGINE_SRC_DIR }}/src
+          # This script installs necessary sysroot and toolchains for cross-compiling
+          # It might require sudo privileges, which are available passwordless on GitHub runners
+          sudo ./build/install-build-deps.sh --arm --no-armhf # Install ARM64 deps, skip ARM32
+          # Optional: Add --no-chromeos-fonts, --no-nacl if you are sure they are not needed
+
+      # Cache the build output directory to speed up incremental builds (if possible)
+      # Key includes source hash (approximated by gclient cache key) and build config
+      - name: Cache Build Output Directory (Linux ARM64 Release)
+        id: build-cache-linux-arm64
+        uses: actions/cache@v4
+        with:
+          # Path to the expected output directory
+          path: ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64
+          # Key depends on the source state (gclient cache key) and the build configuration
+          key: ${{ runner.os }}-linux-arm64-release-build-${{ steps.gclient-cache.outputs.cache-hit }}-${{ hashFiles(format('{0}/src/flutter/tools/gn', env.ENGINE_SRC_DIR), format('{0}/src/DEPS', env.ENGINE_SRC_DIR)) }}
+          restore-keys: |
+            ${{ runner.os }}-linux-arm64-release-build-${{ steps.gclient-cache.outputs.cache-hit }}-
+            ${{ runner.os }}-linux-arm64-release-build-
+
+      - name: Generate build files (GN) for Linux ARM64 Release
+        run: |
+          cd ${{ env.ENGINE_SRC_DIR }}/src
+          # Generate Ninja files for a release build targeting linux-arm64
+          # --no-lto: Disables Link Time Optimization for faster builds (remove for potentially smaller/faster binary)
+          # --goma: If you have goma configured (unlikely in public Actions), otherwise ignored.
+          ./flutter/tools/gn --linux-cpu=arm64 --runtime-mode=release --no-lto --no-goma
+          # Output directory will be out/linux_release_arm64
+
+      - name: Compile Flutter Engine (Ninja) for Linux ARM64 Release
+        run: |
+          cd ${{ env.ENGINE_SRC_DIR }}/src
+          # Use autoninja (part of depot_tools) which automatically parallelizes the build
+          autoninja -C out/linux_release_arm64 :flutter_linux_gtk # Build the GTK embedder target
+          # Alternative: Build all default targets: autoninja -C out/linux_release_arm64
+
+      - name: List key build artifacts
+        run: |
+          cd ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64
+          echo "Listing key artifacts in $(pwd):"
+          ls -la libflutter_linux_gtk.so* || echo "libflutter_linux_gtk.so not found"
+          ls -la icudtl.dat || echo "icudtl.dat not found"
+          ls -la gen_snapshot || echo "gen_snapshot not found"
+          ls -la flutter_patched_sdk || echo "flutter_patched_sdk directory not found"
+          ls -la flutter_patched_sdk_product || echo "flutter_patched_sdk_product directory not found" # Sometimes needed
+
+      - name: Upload Linux ARM64 Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-engine-linux-arm64
-          path: engine/src/flutter_engine_linux_arm64.tar.gz
-          retention-days: 7
-
-      - name: 创建发布（如果从标签触发）
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: engine/src/flutter_engine_linux_arm64.tar.gz
-          name: Flutter Engine Linux ARM64 - ${{ github.ref_name }}
-          body: |
-            Flutter Engine Linux ARM64 构建版本
-            
-            版本: ${{ github.event.inputs.flutter_engine_version || github.ref_name || 'main' }}
-            构建时间: ${{ github.event.repository.updated_at }}
+          name: flutter-engine-linux-arm64-release
+          # Define the paths to the artifacts you want to upload
+          path: |
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/libflutter_linux_gtk.so
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/icudtl.dat
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/gen_snapshot
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/flutter_patched_sdk/
+            ${{ env.ENGINE_SRC_DIR }}/src/out/linux_release_arm64/flutter_patched_sdk_product/ # Include if needed
+            # Add any other required artifacts here
+          retention-days: 7 # Keep artifacts for 7 days (adjust as needed)
+          if-no-files-found: error # Fail the step if specified files are missing
