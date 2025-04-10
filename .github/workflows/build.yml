@@ -42,7 +42,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
+          # 删除了cache: 'pip'选项，因为没有requirements.txt文件
 
       - name: 缓存Flutter Engine
         id: cache-engine-source
